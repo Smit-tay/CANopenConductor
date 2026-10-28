@@ -521,7 +521,7 @@ void SdoClient::onDownloadInitiateResponse(const std::uint8_t* d) noexcept {
 void SdoClient::sendDownloadSegment() noexcept {
     const std::size_t count = smaller(kSegmentBytes, size_ - done_);
     const bool last = done_ + count == size_;
-    const auto command = static_cast<std::uint8_t>((toggle_ << 4) | ((kSegmentBytes - count) << 1) | (last ? 1 : 0));
+    const auto command = static_cast<std::uint8_t>((std::size_t{toggle_} << 4) | ((kSegmentBytes - count) << 1) | (last ? 1u : 0u));
     CanFrame f = request(config_.requestId, command);
     if (count > 0) {
         std::memcpy(&f.data[1], downData_ + done_, count);

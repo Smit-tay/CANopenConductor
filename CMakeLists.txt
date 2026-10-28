@@ -6,7 +6,9 @@ option(CANOPEN_CONDUCTOR_WERROR "Treat warnings as errors" OFF)
 # Library-private flags. Never propagated to consumers.
 function(canopen_conductor_private_options target)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4)
+        # C4061 (enumerator not handled by a case label, even with a default) is switched on by some hosts; the
+        # switches here end in a deliberate default.
+        target_compile_options(${target} PRIVATE /W4 /wd4061)
         if(CANOPEN_CONDUCTOR_WERROR)
             target_compile_options(${target} PRIVATE /WX)
         endif()

@@ -195,7 +195,7 @@ SdoClientConfig Master::clientConfig(const NodeConfig& node) const noexcept {
 }
 
 void Master::setRoute(std::uint32_t id, Route kind, std::size_t slot) noexcept {
-    route_[id] = kind == RouteNone ? std::uint16_t{0} : static_cast<std::uint16_t>((kind << 13) | slot);
+    route_[id] = kind == RouteNone ? std::uint16_t{0} : static_cast<std::uint16_t>((static_cast<std::size_t>(kind) << 13) | slot);
 }
 
 // Point (or clear) the routes of the node in slot `index`.
@@ -242,7 +242,7 @@ bool Master::removeNode(std::uint8_t nodeId) noexcept {
         // The last node moved into this slot: move its client and routes too.
         routeNode(last, false);
         sdo_[index] = sdo_[last];
-        for (int k = 0; k < 3; ++k) {
+        for (std::size_t k = 0; k < 3; ++k) {
             sdoIds_[index * 3 + k] = sdoIds_[last * 3 + k];
         }
         routeNode(index, true);
