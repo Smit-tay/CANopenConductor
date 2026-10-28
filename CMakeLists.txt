@@ -6,7 +6,7 @@ option(CANOPEN_CONDUCTOR_WERROR "Treat warnings as errors" OFF)
 # Library-private flags. Never propagated to consumers.
 function(canopen_conductor_private_options target)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /EHs-c- /GR-)
+        target_compile_options(${target} PRIVATE /W4)
         if(CANOPEN_CONDUCTOR_WERROR)
             target_compile_options(${target} PRIVATE /WX)
         endif()
