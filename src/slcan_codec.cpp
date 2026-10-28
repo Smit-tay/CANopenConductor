@@ -1,4 +1,4 @@
-#include "slcan_codec.hpp"
+#include "canopen_conductor/slcan_codec.hpp"
 
 namespace canopen_conductor::slcan {
 

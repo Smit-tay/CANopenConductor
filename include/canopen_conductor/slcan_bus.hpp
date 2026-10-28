@@ -1,11 +1,11 @@
 #pragma once
 
 // slcan host port: an ICanBus over a serial-line CAN adapter (Linux and
-// Windows). Not part of the library.
+// Windows). Host layer: this talks to the operating system.
 
 #include "canopen_conductor/can_bus.hpp"
-#include "serial_port.hpp"
-#include "slcan_codec.hpp"
+#include "canopen_conductor/serial_port.hpp"
+#include "canopen_conductor/slcan_codec.hpp"
 
 #include <cstddef>
 
@@ -16,7 +16,13 @@ public:
     // Opens `device` ("/dev/ttyACM0", "COM3") and starts the CAN channel at
     // `canKbit` (10, 20, 50, 100, 125, 250, 500, 800, 1000).
     bool open(const char* device, unsigned serialBaud, unsigned canKbit) noexcept;
-    void close() noexcept;
+    // False if the OS reported an error while closing. The port is closed in any case.
+    bool close() noexcept;
+
+    // Makes a blocked receive() return early (RxStatus::Timeout). Not owned; set before open().
+    void setWaker(Waker* waker) noexcept { port_.setWaker(waker); }
+    // The OS error behind the last failed open(), send() or receive(); 0 if none.
+    int osError() const noexcept { return port_.osError(); }
 
     bool send(const CanFrame& frame) noexcept override;
     RxStatus receive(CanFrame& out, Duration timeout) noexcept override;

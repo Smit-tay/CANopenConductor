@@ -1,14 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(CANopenConductor VERSION 0.1.0 LANGUAGES CXX)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(_conductor_socketcan_default ON)
-else()
-    set(_conductor_socketcan_default OFF)
-endif()
-
-option(CANOPEN_CONDUCTOR_SOCKETCAN "Build the SocketCAN bus (Linux)" ${_conductor_socketcan_default})
-option(CANOPEN_CONDUCTOR_SLCAN "Build the slcan serial bus (POSIX and Windows)" ON)
 option(CANOPEN_CONDUCTOR_WERROR "Treat warnings as errors" OFF)
 
 # Library-private flags. Never propagated to consumers.
@@ -28,7 +20,16 @@ function(canopen_conductor_private_options target)
     endif()
 endfunction()
 
-# Core library: no threads, no I/O, no heap use after create().
+# One library. The protocol sources use no OS headers. The connection sources (link, slcan, SocketCAN) are
+# compiled per platform: the serial port is POSIX or Windows, SocketCAN is Linux only.
+if(WIN32)
+    set(_conductor_platform src/serial_win32.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(_conductor_platform src/serial_posix.cpp src/socketcan_bus.cpp)
+else()
+    set(_conductor_platform src/serial_posix.cpp)
+endif()
+
 add_library(canopen_conductor
     src/lss_master.cpp
     src/master.cpp
@@ -37,38 +38,38 @@ add_library(canopen_conductor
     src/pdo.cpp
     src/sdo_client.cpp
     src/sync_producer.cpp
+    src/link.cpp
+    src/session.cpp
+    src/slcan_bus.cpp
+    src/slcan_codec.cpp
+    src/waker.cpp
+    ${_conductor_platform}
 )
 add_library(CANopenConductor::CANopenConductor ALIAS canopen_conductor)
 target_include_directories(canopen_conductor PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_compile_features(canopen_conductor PUBLIC cxx_std_20)
+# Usable inside a shared library or a plug-in module
+set_target_properties(canopen_conductor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 canopen_conductor_private_options(canopen_conductor)
 
-# SocketCAN bus (Linux).
-if(CANOPEN_CONDUCTOR_SOCKETCAN)
-    add_library(canopen_conductor_socketcan ports/linux/socketcan_bus.cpp)
-    add_library(CANopenConductor::SocketCAN ALIAS canopen_conductor_socketcan)
-    target_include_directories(canopen_conductor_socketcan PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ports/linux>)
-    target_link_libraries(canopen_conductor_socketcan PUBLIC canopen_conductor)
-    canopen_conductor_private_options(canopen_conductor_socketcan)
+# Tests of the connection (Linux: a pty plays the slcan adapter).
+option(CANOPEN_CONDUCTOR_TESTS "Build the connection tests" OFF)
+if(CANOPEN_CONDUCTOR_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    enable_testing()
+    foreach(_test link_test session_test)
+        add_executable(${_test} test/${_test}.cpp)
+        target_link_libraries(${_test} PRIVATE canopen_conductor)
+        add_test(NAME ${_test} COMMAND ${_test})
+    endforeach()
 endif()
 
-# slcan serial bus (POSIX tty or Windows COM port).
-if(CANOPEN_CONDUCTOR_SLCAN)
-    if(WIN32)
-        set(_conductor_serial ports/slcan/serial_win32.cpp)
-    else()
-        set(_conductor_serial ports/slcan/serial_posix.cpp)
-    endif()
-    add_library(canopen_conductor_slcan
-        ports/slcan/slcan_bus.cpp
-        ports/slcan/slcan_codec.cpp
-        ${_conductor_serial})
-    add_library(CANopenConductor::Slcan ALIAS canopen_conductor_slcan)
-    target_include_directories(canopen_conductor_slcan PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ports/slcan>)
-    target_link_libraries(canopen_conductor_slcan PUBLIC canopen_conductor)
-    canopen_conductor_private_options(canopen_conductor_slcan)
+# The console: a small program to try the connection by hand, on real hardware.
+option(CANOPEN_CONDUCTOR_CONSOLE "Build canopen-console" OFF)
+if(CANOPEN_CONDUCTOR_CONSOLE)
+    add_executable(canopen-console console/main.cpp console/terminal.cpp)
+    target_link_libraries(canopen-console PRIVATE canopen_conductor)
+    find_package(Threads REQUIRED)
+    target_link_libraries(canopen-console PRIVATE Threads::Threads)
 endif()

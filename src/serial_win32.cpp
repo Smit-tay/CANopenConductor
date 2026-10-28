@@ -3,7 +3,7 @@
 // NOTE: not compiled or tested yet (no Windows toolchain on the
 // development machine).
 
-#include "serial_port.hpp"
+#include "canopen_conductor/serial_port.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -31,11 +31,13 @@ SerialPort::~SerialPort() {
 
 bool SerialPort::open(const char* device, unsigned baud) noexcept {
     close();
+    osError_ = 0;
     char path[64];
     std::snprintf(path, sizeof path, "\\\\.\\%s", device);  // also reaches COM10 and above
     HANDLE h = ::CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED,
                              nullptr);
     if (h == INVALID_HANDLE_VALUE) {
+        osError_ = static_cast<int>(::GetLastError());
         return false;
     }
     DCB dcb{};
@@ -53,6 +55,7 @@ bool SerialPort::open(const char* device, unsigned baud) noexcept {
     dcb.fOutX = FALSE;
     dcb.fInX = FALSE;
     if (!::SetCommState(h, &dcb)) {
+        osError_ = static_cast<int>(::GetLastError());
         ::CloseHandle(h);
         return false;
     }
@@ -62,13 +65,22 @@ bool SerialPort::open(const char* device, unsigned baud) noexcept {
     std::memset(readOv_, 0, sizeof readOv_);
     std::memset(writeOv_, 0, sizeof writeOv_);
     writing_ = false;
-    return readEvent_ != nullptr && writeEvent_ != nullptr;
+    if (readEvent_ == nullptr || writeEvent_ == nullptr) {
+        osError_ = static_cast<int>(::GetLastError());
+        close();
+        return false;
+    }
+    return true;
 }
 
-void SerialPort::close() noexcept {
+bool SerialPort::close() noexcept {
+    bool ok = true;
     if (handle_ != nullptr) {
         ::CancelIo(static_cast<HANDLE>(handle_));
-        ::CloseHandle(static_cast<HANDLE>(handle_));
+        if (!::CloseHandle(static_cast<HANDLE>(handle_))) {
+            osError_ = static_cast<int>(::GetLastError());
+            ok = false;
+        }
         handle_ = nullptr;
     }
     if (readEvent_ != nullptr) {
@@ -79,6 +91,7 @@ void SerialPort::close() noexcept {
         ::CloseHandle(static_cast<HANDLE>(writeEvent_));
         writeEvent_ = nullptr;
     }
+    return ok;
 }
 
 bool SerialPort::isOpen() const noexcept {
@@ -93,7 +106,11 @@ long SerialPort::write(const char* data, std::size_t size) noexcept {
     if (writing_) {  // one overlapped write at a time
         DWORD done = 0;
         if (!::GetOverlappedResult(h, ov(writeOv_), &done, FALSE)) {
-            return ::GetLastError() == ERROR_IO_INCOMPLETE ? 0 : -1;
+            if (::GetLastError() == ERROR_IO_INCOMPLETE) {
+                return 0;
+            }
+            osError_ = static_cast<int>(::GetLastError());
+            return -1;
         }
         writing_ = false;
     }
@@ -103,6 +120,7 @@ long SerialPort::write(const char* data, std::size_t size) noexcept {
     ov(writeOv_)->hEvent = static_cast<HANDLE>(writeEvent_);
     if (!::WriteFile(h, writeBuf_, static_cast<DWORD>(n), nullptr, ov(writeOv_))) {
         if (::GetLastError() != ERROR_IO_PENDING) {
+            osError_ = static_cast<int>(::GetLastError());
             return -1;
         }
         writing_ = true;  // completes in the background; the bytes are ours to forget
@@ -127,13 +145,30 @@ long SerialPort::read(char* buf, std::size_t capacity, Duration timeout) noexcep
     DWORD got = 0;
     if (!::ReadFile(h, buf, static_cast<DWORD>(capacity), &got, ov(readOv_))) {
         if (::GetLastError() != ERROR_IO_PENDING) {
+            osError_ = static_cast<int>(::GetLastError());
             return -1;
         }
-        if (::WaitForSingleObject(static_cast<HANDLE>(readEvent_), static_cast<DWORD>(ms) + 100) != WAIT_OBJECT_0) {
+        // Wait for data, the timeout or a wake. A wake cancels the read; bytes that arrived at the same
+        // moment are still returned by GetOverlappedResult() below.
+        HANDLE waits[2] = { static_cast<HANDLE>(readEvent_), nullptr };
+        DWORD count = 1;
+        if (waker_ != nullptr && waker_->valid()) {
+            waits[1] = static_cast<HANDLE>(waker_->handle());
+            count = 2;
+        }
+        const DWORD which = ::WaitForMultipleObjects(count, waits, FALSE, static_cast<DWORD>(ms) + 100);
+        if (which != WAIT_OBJECT_0) {
+            if (which == WAIT_OBJECT_0 + 1) {
+                waker_->drain();
+            }
             ::CancelIo(h);
         }
         if (!::GetOverlappedResult(h, ov(readOv_), &got, TRUE)) {
-            return ::GetLastError() == ERROR_OPERATION_ABORTED ? 0 : -1;
+            if (::GetLastError() == ERROR_OPERATION_ABORTED) {
+                return 0;
+            }
+            osError_ = static_cast<int>(::GetLastError());
+            return -1;
         }
     }
     return static_cast<long>(got);

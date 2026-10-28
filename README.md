@@ -38,23 +38,43 @@ add_subdirectory(CANopenConductor)
 target_link_libraries(my_app PRIVATE CANopenConductor::CANopenConductor)
 ```
 
-Bus implementations are separate targets:
+There is one target. It contains the CANopen protocol code, which uses no OS
+headers, and the connection code, which is compiled per platform:
 
-| Target | Platform |
+| File | Platform |
 |---|---|
-| `CANopenConductor::SocketCAN` | Linux (SocketCAN) |
-| `CANopenConductor::Slcan` | serial adapters speaking slcan: Linux tty, Windows COM port (Windows support is experimental) |
+| `link.hpp` | all: one CAN connection over whichever port fits the interface name |
+| `session.hpp` | all: the life of a connection (connect until it opens, report a loss, reconnect on command) |
+| `slcan_bus.hpp` | serial adapters speaking slcan: POSIX tty, Windows COM port (Windows is experimental) |
+| `socketcan_bus.hpp` | Linux (SocketCAN) |
+| `waker.hpp` | all: lets another thread interrupt a blocked `receive()` |
+
+A project with its own `ICanBus` just does not use these headers.
 
 CMake options:
 
 | Option | Default | |
 |---|---|---|
-| `CANOPEN_CONDUCTOR_SOCKETCAN` | ON on Linux | build the SocketCAN bus |
-| `CANOPEN_CONDUCTOR_SLCAN` | ON | build the slcan bus |
+| `CANOPEN_CONDUCTOR_TESTS` | OFF | build the connection tests (Linux) |
+| `CANOPEN_CONDUCTOR_CONSOLE` | OFF | build `canopen-console`, a program to try the connection by hand |
 | `CANOPEN_CONDUCTOR_WERROR` | OFF | treat warnings as errors |
 
 The library is built with `-fno-exceptions -fno-rtti` (`/EHs-c- /GR-` on
 MSVC). These flags apply to the library only. Your code is unaffected.
+
+## The connection
+
+`Session` (on top of `Link`) is what a host uses to keep one CAN interface connected. It starts no thread: the
+host calls `step()` in a loop on its own I/O thread, and gives the commands from any thread.
+
+- `connect()` opens the interface and keeps trying until it opens. The first failure is reported once
+  (`ConnectFailed`), later attempts are quiet. A success is reported (`Connected`).
+- A lost interface is reported once (`Lost`). A `Session` never reconnects by itself.
+- `reconnect()` starts a new connect command, but only if a connection is wanted and nothing is open or being
+  tried. `disconnect()` closes the interface and stops trying.
+
+`canopen-console <interface> [bitrate]` runs a `Session` the same way, with a small split-screen console
+(`HELP`, `STATUS`, `CONNECT`, `RECONNECT`, `DISCONNECT`, `QUIT`).
 
 ## Use
 
@@ -62,7 +82,7 @@ MSVC). These flags apply to the library only. Your code is unaffected.
 #include <canopen_conductor/master.hpp>
 using namespace canopen_conductor;
 
-MyBus bus;                       // your ICanBus, or one of the ports
+MyBus bus;                       // your ICanBus, or Link / one of the ports
 MasterConfig config;             // nodes, PDOs, callbacks, ...
 // ... fill in config ...
 
@@ -95,8 +115,7 @@ callbacks in `MasterConfig`.
 |---|---|
 | `include/canopen_conductor/` | public headers |
 | `src/` | library sources |
-| `ports/linux/` | SocketCAN `ICanBus` |
-| `ports/slcan/` | slcan `ICanBus` (POSIX and Windows serial ports) |
+| `test/` | connection test |
 
 ## License
 

@@ -3,6 +3,7 @@ build-*/
 cmake-build-*/
 out/
 .cache/
+.vs/
 .vscode/
 .idea/
 *.o

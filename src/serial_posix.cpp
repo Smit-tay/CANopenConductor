@@ -1,4 +1,4 @@
-#include "serial_port.hpp"
+#include "canopen_conductor/serial_port.hpp"
 
 #include <cerrno>
 #include <fcntl.h>
@@ -46,8 +46,10 @@ SerialPort::~SerialPort() {
 
 bool SerialPort::open(const char* device, unsigned baud) noexcept {
     close();
+    osError_ = 0;
     fd_ = ::open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) {
+        osError_ = errno;
         return false;
     }
     termios t{};
@@ -62,11 +64,16 @@ bool SerialPort::open(const char* device, unsigned baud) noexcept {
     return true;
 }
 
-void SerialPort::close() noexcept {
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
+bool SerialPort::close() noexcept {
+    if (fd_ < 0) {
+        return true;
     }
+    const bool ok = ::close(fd_) == 0;  // the descriptor is gone even when this fails; no retry
+    if (!ok) {
+        osError_ = errno;
+    }
+    fd_ = -1;
+    return ok;
 }
 
 bool SerialPort::isOpen() const noexcept {
@@ -85,7 +92,11 @@ long SerialPort::write(const char* data, std::size_t size) noexcept {
         if (errno == EINTR) {
             continue;
         }
-        return errno == EAGAIN ? 0 : -1;
+        if (errno == EAGAIN) {
+            return 0;
+        }
+        osError_ = errno;
+        return -1;
     }
 }
 
@@ -93,28 +104,50 @@ long SerialPort::read(char* buf, std::size_t capacity, Duration timeout) noexcep
     if (fd_ < 0) {
         return -1;
     }
-    pollfd p{};
-    p.fd = fd_;
-    p.events = POLLIN;
+    pollfd p[2] = {};
+    p[0].fd = fd_;
+    p[0].events = POLLIN;
+    nfds_t count = 1;
+    if (waker_ != nullptr && waker_->valid()) {
+        p[1].fd = waker_->fd();
+        p[1].events = POLLIN;
+        count = 2;
+    }
     const auto us = timeout.count() > 0 ? timeout.count() : 0;
     timespec ts{};
     ts.tv_sec = static_cast<time_t>(us / 1'000'000);
     ts.tv_nsec = static_cast<long>((us % 1'000'000) * 1000);
-    const int ready = ::ppoll(&p, 1, &ts, nullptr);
+    const int ready = ::ppoll(p, count, &ts, nullptr);
     if (ready == 0 || (ready < 0 && errno == EINTR)) {
         return 0;
     }
-    if (ready < 0 || (p.revents & (POLLERR | POLLNVAL)) != 0) {
+    if (ready < 0) {
+        osError_ = errno;
         return -1;
+    }
+    if (count == 2 && p[1].revents != 0) {
+        waker_->drain();  // woken. Data that arrived at the same time is read below, not lost.
+    }
+    if ((p[0].revents & (POLLERR | POLLNVAL)) != 0) {
+        osError_ = EIO;
+        return -1;
+    }
+    if ((p[0].revents & (POLLIN | POLLHUP)) == 0) {
+        return 0;  // only the wake
     }
     const ssize_t n = ::read(fd_, buf, capacity);
     if (n > 0) {
         return static_cast<long>(n);
     }
-    if (n == 0 || (p.revents & POLLHUP) != 0) {
+    if (n == 0 || (p[0].revents & POLLHUP) != 0) {
+        osError_ = EIO;
         return -1;  // device gone
     }
-    return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+    if (errno == EAGAIN || errno == EINTR) {
+        return 0;
+    }
+    osError_ = errno;
+    return -1;
 }
 
 } // namespace canopen_conductor::slcan

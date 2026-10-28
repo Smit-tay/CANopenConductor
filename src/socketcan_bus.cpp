@@ -1,4 +1,4 @@
-#include "socketcan_bus.hpp"
+#include "canopen_conductor/socketcan_bus.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -20,12 +20,15 @@ SocketCanBus::~SocketCanBus() {
 
 bool SocketCanBus::open(const char* ifname) noexcept {
     close();
+    osError_ = 0;
     const unsigned index = if_nametoindex(ifname);
     if (index == 0) {
+        osError_ = errno != 0 ? errno : ENODEV;
         return false;
     }
     fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (fd_ < 0) {
+        osError_ = errno;
         return false;
     }
     // Controller problems, bus-off, missing ACK and bus errors as error frames.
@@ -38,7 +41,9 @@ bool SocketCanBus::open(const char* ifname) noexcept {
     addr.can_family = AF_CAN;
     addr.can_ifindex = static_cast<int>(index);
     if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof addr) < 0) {
+        const int error = errno;
         close();
+        osError_ = error;
         return false;
     }
     lost_ = false;
@@ -48,11 +53,16 @@ bool SocketCanBus::open(const char* ifname) noexcept {
     return true;
 }
 
-void SocketCanBus::close() noexcept {
-    if (fd_ >= 0) {
-        ::close(fd_);
-        fd_ = -1;
+bool SocketCanBus::close() noexcept {
+    if (fd_ < 0) {
+        return true;
     }
+    const bool ok = ::close(fd_) == 0;  // the descriptor is gone even when this fails; no retry
+    if (!ok) {
+        osError_ = errno;
+    }
+    fd_ = -1;
+    return ok;
 }
 
 bool SocketCanBus::send(const CanFrame& frame) noexcept {
@@ -78,6 +88,7 @@ bool SocketCanBus::send(const CanFrame& frame) noexcept {
             continue;
         }
         if (n < 0 && (errno == ENETDOWN || errno == ENODEV || errno == ENXIO)) {
+            osError_ = errno;
             lost_ = true;  // reported by the next receive()
         }
         return false;  // EAGAIN / ENOBUFS: queue full
@@ -125,21 +136,48 @@ BusStatus SocketCanBus::takeBusStatus() noexcept {
 
 RxStatus SocketCanBus::receive(CanFrame& out, Duration timeout) noexcept {
     if (fd_ < 0 || lost_) {
+        if (osError_ == 0) {
+            osError_ = ENETDOWN;
+        }
         return RxStatus::Error;
     }
-    pollfd p{};
-    p.fd = fd_;
-    p.events = POLLIN;
+    pollfd p[2] = {};
+    p[0].fd = fd_;
+    p[0].events = POLLIN;
+    nfds_t count = 1;
+    if (waker_ != nullptr && waker_->valid()) {
+        p[1].fd = waker_->fd();
+        p[1].events = POLLIN;
+        count = 2;
+    }
     const auto us = timeout.count() > 0 ? timeout.count() : 0;
     timespec ts{};
     ts.tv_sec = static_cast<time_t>(us / 1'000'000);
     ts.tv_nsec = static_cast<long>((us % 1'000'000) * 1000);
-    const int ready = ::ppoll(&p, 1, &ts, nullptr);
+    const int ready = ::ppoll(p, count, &ts, nullptr);
     if (ready == 0 || (ready < 0 && errno == EINTR)) {
         return RxStatus::Timeout;
     }
-    if (ready < 0 || (p.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+    if (ready < 0) {
+        osError_ = errno;
         return RxStatus::Error;
+    }
+    if (count == 2 && p[1].revents != 0) {
+        waker_->drain();  // woken. A frame that arrived at the same time is read below, not lost.
+    }
+    if ((p[0].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        // The interface went down or away. The socket's pending error says which, if it knows.
+        int error = 0;
+        socklen_t size = sizeof error;
+        if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &error, &size) != 0 || error == 0) {
+            error = ENETDOWN;
+        }
+        osError_ = error;
+        lost_ = true;
+        return RxStatus::Error;
+    }
+    if ((p[0].revents & POLLIN) == 0) {
+        return RxStatus::Timeout;  // only the wake
     }
 
     can_frame raw{};
@@ -152,11 +190,14 @@ RxStatus SocketCanBus::receive(CanFrame& out, Duration timeout) noexcept {
     msg.msg_controllen = sizeof control;
     const ssize_t n = ::recvmsg(fd_, &msg, 0);
     if (n < 0) {
+        if (errno == EAGAIN || errno == EINTR) {
+            return RxStatus::Timeout;
+        }
+        osError_ = errno;
         if (errno == ENETDOWN || errno == ENODEV || errno == ENXIO) {
             lost_ = true;
-            return RxStatus::Error;
         }
-        return (errno == EAGAIN || errno == EINTR) ? RxStatus::Timeout : RxStatus::Error;
+        return RxStatus::Error;
     }
     for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
         if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SO_RXQ_OVFL) {

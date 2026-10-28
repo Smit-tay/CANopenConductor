@@ -1,4 +1,4 @@
-#include "slcan_bus.hpp"
+#include "canopen_conductor/slcan_bus.hpp"
 
 #include <cstring>
 
@@ -25,11 +25,12 @@ bool SlcanBus::open(const char* device, unsigned serialBaud, unsigned canKbit) n
     return flush();
 }
 
-void SlcanBus::close() noexcept {
-    if (port_.isOpen()) {
-        port_.write("C\r", 2);
-        port_.close();
+bool SlcanBus::close() noexcept {
+    if (!port_.isOpen()) {
+        return true;
     }
+    port_.write("C\r", 2);
+    return port_.close();
 }
 
 bool SlcanBus::queue(const char* text, std::size_t n) noexcept {
