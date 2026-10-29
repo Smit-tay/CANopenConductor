@@ -1,8 +1,9 @@
 # CANopenConductor
 
 An embeddable CANopen master library for C++20. You call it from your own
-I/O loop. It starts no threads, reads no clock, and never touches the bus
-itself.
+I/O loop. It starts no threads and reads no clock. The protocol code never
+touches the bus itself; the separate connection code (`Link`, `Session`) opens
+the port for you, if you want it to.
 
 ## Features
 
@@ -45,7 +46,7 @@ headers, and the connection code, which is compiled per platform:
 |---|---|
 | `link.hpp` | all: one CAN connection over whichever port fits the interface name |
 | `session.hpp` | all: the life of a connection (connect until it opens, report a loss, reconnect on command) |
-| `slcan_bus.hpp` | serial adapters speaking slcan: POSIX tty, Windows COM port (Windows is experimental) |
+| `slcan_bus.hpp` | serial adapters speaking slcan: POSIX tty, Windows COM port (the Windows port has been tested with one adapter) |
 | `socketcan_bus.hpp` | Linux (SocketCAN) |
 | `waker.hpp` | all: lets another thread interrupt a blocked `receive()` |
 
@@ -59,8 +60,10 @@ CMake options:
 | `CANOPEN_CONDUCTOR_CONSOLE` | OFF | build `canopen-console`, a program to try the connection by hand |
 | `CANOPEN_CONDUCTOR_WERROR` | OFF | treat warnings as errors |
 
-The library is built with `-fno-exceptions -fno-rtti` (`/EHs-c- /GR-` on
-MSVC). These flags apply to the library only. Your code is unaffected.
+On GCC and Clang the library is built with `-fno-exceptions -fno-rtti`; MSVC
+uses its default flags. These flags apply to the library only. Your code is
+unaffected. The library is built position-independent, so it can be linked into
+a shared library or plugin.
 
 ## The connection
 
@@ -72,9 +75,12 @@ host calls `step()` in a loop on its own I/O thread, and gives the commands from
 - A lost interface is reported once (`Lost`). A `Session` never reconnects by itself.
 - `reconnect()` starts a new connect command, but only if a connection is wanted and nothing is open or being
   tried. `disconnect()` closes the interface and stops trying.
+- `viaReconnect()` tells whether the command that was reported came from `reconnect()` or from `connect()`, so a
+  host can tell a first failure from a failed reconnect.
 
 `canopen-console <interface> [bitrate]` runs a `Session` the same way, with a small split-screen console
-(`HELP`, `STATUS`, `CONNECT`, `RECONNECT`, `DISCONNECT`, `QUIT`).
+(`HELP`, `STATUS`, `CONNECT`, `RECONNECT`, `DISCONNECT`, `QUIT`). The interface is `COM3` or `/dev/ttyACM0` for an
+slcan adapter, or `can0` for SocketCAN (Linux). The bitrate is in bit/s and defaults to 500000.
 
 ## Use
 
@@ -115,7 +121,7 @@ callbacks in `MasterConfig`.
 |---|---|
 | `include/canopen_conductor/` | public headers |
 | `src/` | library sources |
-| `test/` | connection test |
+| `test/` | connection tests (`link_test`, `session_test`) |
 
 ## License
 
