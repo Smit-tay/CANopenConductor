@@ -5,8 +5,9 @@
 // <interface> is "COM3" or "/dev/ttyACM0" for an slcan adapter, or "can0" for a SocketCAN interface (Linux).
 // The bitrate is in bit/s and defaults to 500000.
 //
-// It runs the Session the same way a host does: one I/O thread calls step() in a loop, and the commands typed
-// here are given from this thread. Type HELP.
+// It runs the Session the same way a host does: one I/O thread calls step() in a loop. The Session decides nothing,
+// so this console is the state machine: a typed command is a request, the I/O thread carries it out. CONNECT makes
+// one attempt and reports it. Nothing is ever retried. Type HELP.
 #include "canopen_conductor/session.hpp"
 
 #include "terminal.hpp"
@@ -38,6 +39,9 @@ struct App {
 
     // Written by the I/O thread, read by the command thread
     std::atomic<const char*> state { "closed" };
+    // Requests from the command thread. DISCONNECT is checked first, so it always wins.
+    std::atomic<bool> connectRequested { false };
+    std::atomic<bool> disconnectRequested { false };
     std::atomic<unsigned> connectedCount { 0 };
     std::atomic<unsigned> failedCount { 0 };
     std::atomic<unsigned> lostCount { 0 };
@@ -60,48 +64,61 @@ std::string toUpper(std::string s) {
 
 // --- the I/O thread ---
 
+void setState(App& app) {
+    app.state = app.session.linkState() == LinkState::Open   ? "open"
+              : app.session.linkState() == LinkState::Lost ? "lost"
+                                                           : "closed";
+}
+
 void ioThread(std::stop_token stop, App& app) {
     // A stop request must also end a step() that is waiting
     std::stop_callback onStop(stop, [&app] { app.session.wake(); });
 
     while (!stop.stop_requested()) {
-        const SessionEvent event = app.session.step(1s);
-
-        switch (event) {
-        case SessionEvent::None:
-            break;
-        case SessionEvent::Connected:
-            ++app.connectedCount;
-            {
-                std::lock_guard<std::mutex> lock(app.errorMutex);
-                app.lastError.clear();
-            }
-            app.print("CONNECTED " + app.interface);
-            break;
-        case SessionEvent::ConnectFailed:
-        case SessionEvent::Lost:
-        case SessionEvent::Disconnected: {
-            const std::string text = app.session.error().code == LinkErrc::None ? "" : describe(app.session.error());
-            if (event == SessionEvent::ConnectFailed) {
-                ++app.failedCount;
-                app.print(std::string(app.session.viaReconnect() ? "RECONNECT" : "CONNECT") + " FAILED: " + text +
-                          " (trying again every 200 ms, quietly)");
-            } else if (event == SessionEvent::Lost) {
-                ++app.lostCount;
-                app.print("LOST: " + text + " (type RECONNECT to try again)");
+        // DISCONNECT first: it is always obeyed, and it drops a CONNECT that was given before it was looked at
+        if (app.disconnectRequested.exchange(false)) {
+            app.connectRequested = false;
+            const bool wasOpen = app.session.linkState() == LinkState::Open;
+            const bool closed = app.session.close();
+            if (wasOpen) {
+                app.print(closed ? std::string("DISCONNECTED")
+                                 : "DISCONNECTED: " + describe(app.session.error()));
             } else {
-                app.print("DISCONNECTED" + (text.empty() ? std::string() : ": " + text));
+                app.print("DISCONNECTED (nothing was open)");
             }
             std::lock_guard<std::mutex> lock(app.errorMutex);
-            app.lastError = text;
-            break;
-        }
+            app.lastError.clear();
         }
 
-        app.state = app.session.linkState() == LinkState::Open ? "open"
-                  : app.session.connecting()                   ? "connecting"
-                  : app.session.linkState() == LinkState::Lost ? "lost"
-                                                               : "closed";
+        if (app.connectRequested.exchange(false)) {
+            if (app.session.connect()) {
+                ++app.connectedCount;
+                {
+                    std::lock_guard<std::mutex> lock(app.errorMutex);
+                    app.lastError.clear();
+                }
+                app.print("CONNECTED " + app.interface);
+            } else {
+                const std::string text = describe(app.session.error());
+                if (app.session.error().code == LinkErrc::WrongState) {
+                    app.print("REJECTED: already connected. DISCONNECT first.");
+                } else {
+                    ++app.failedCount;
+                    app.print("CONNECT FAILED: " + text + " (nothing is tried again; type CONNECT)");
+                    std::lock_guard<std::mutex> lock(app.errorMutex);
+                    app.lastError = text;
+                }
+            }
+        }
+
+        if (app.session.step(1s) == SessionEvent::Lost) {
+            ++app.lostCount;
+            const std::string text = describe(app.session.error());
+            app.print("LOST: " + text + " (nothing is tried again; type CONNECT)");
+            std::lock_guard<std::mutex> lock(app.errorMutex);
+            app.lastError = text;
+        }
+        setState(app);
     }
     app.session.close();
 }
@@ -160,19 +177,15 @@ Result cmdStatus(App& app, const std::vector<std::string>&) {
 }
 
 Result cmdConnect(App& app, const std::vector<std::string>&) {
-    app.session.connect();
-    app.print("OK: connect requested");
-    return Result::Ok;
-}
-
-Result cmdReconnect(App& app, const std::vector<std::string>&) {
-    app.session.reconnect();
-    app.print("OK: reconnect requested (ignored if open, already trying, or after DISCONNECT)");
+    app.connectRequested = true;
+    app.session.wake();
+    app.print("OK: connect requested (one attempt)");
     return Result::Ok;
 }
 
 Result cmdDisconnect(App& app, const std::vector<std::string>&) {
-    app.session.disconnect();
+    app.disconnectRequested = true;
+    app.session.wake();
     app.print("OK: disconnect requested");
     return Result::Ok;
 }
@@ -185,10 +198,9 @@ Result cmdQuit(App&, const std::vector<std::string>&) {
 const Command kCommands[] = {
     { "HELP", "HELP [command]", "show the commands, or the usage of one", cmdHelp },
     { "STATUS", "STATUS", "state of the connection, frame count, event counts, last error", cmdStatus },
-    { "CONNECT", "CONNECT", "open the interface, and keep trying until it opens", cmdConnect },
-    { "RECONNECT", "RECONNECT", "connect again after LOST (does nothing if open, trying, or after DISCONNECT)",
-      cmdReconnect },
-    { "DISCONNECT", "DISCONNECT", "close the interface and stop trying", cmdDisconnect },
+    { "CONNECT", "CONNECT", "one attempt to open the interface (rejected if it is open)",
+      cmdConnect },
+    { "DISCONNECT", "DISCONNECT", "close the interface; always obeyed", cmdDisconnect },
     { "QUIT", "QUIT", "close the interface and leave", cmdQuit },
 };
 const std::size_t kCommandCount = sizeof kCommands / sizeof kCommands[0];

@@ -44,7 +44,7 @@ headers, and the connection code, which is compiled per platform:
 | File | Platform |
 |---|---|
 | `link.hpp` | all: one CAN connection over whichever port fits the interface name |
-| `session.hpp` | all: the life of a connection (connect until it opens, report a loss, reconnect on command) |
+| `session.hpp` | all: one connection, driven by the host (one connect attempt, close, report a loss) |
 | `slcan_bus.hpp` | serial adapters speaking slcan: POSIX tty, Windows COM port (Windows is experimental) |
 | `socketcan_bus.hpp` | Linux (SocketCAN) |
 | `waker.hpp` | all: lets another thread interrupt a blocked `receive()` |
@@ -64,17 +64,20 @@ MSVC). These flags apply to the library only. Your code is unaffected.
 
 ## The connection
 
-`Session` (on top of `Link`) is what a host uses to keep one CAN interface connected. It starts no thread: the
-host calls `step()` in a loop on its own I/O thread, and gives the commands from any thread.
+`Session` (on top of `Link`) is what a host uses to drive one CAN interface. It is mechanism only: it decides
+nothing and retries nothing. The host owns the state machine (when to connect, what to do after a loss). It starts no
+thread: the host calls `step()` in a loop on its own I/O thread, and calls `connect()` and `close()` from that thread.
 
-- `connect()` opens the interface and keeps trying until it opens. The first failure is reported once
-  (`ConnectFailed`), later attempts are quiet. A success is reported (`Connected`).
-- A lost interface is reported once (`Lost`). A `Session` never reconnects by itself.
-- `reconnect()` starts a new connect command, but only if a connection is wanted and nothing is open or being
-  tried. `disconnect()` closes the interface and stops trying.
+- `connect(timeout)` makes one attempt to open the interface and returns the result (`error()` says why not). It is
+  refused while the interface is open (`WrongState`). The timeout is applied after the fact: an open that took longer
+  than allowed is closed again and reported as `Timeout`, because the OS call itself cannot be interrupted.
+- `close()` closes the interface. It is valid in every state and always ends `Closed`.
+- `step()` reads while the interface is open. A failure is reported once (`Lost`), and the link stays `Lost` until the
+  host calls `connect()` or `close()`. A `Session` never reconnects by itself. `wake()` (any thread) ends a waiting
+  `step()` at once.
 
-`canopen-console <interface> [bitrate]` runs a `Session` the same way, with a small split-screen console
-(`HELP`, `STATUS`, `CONNECT`, `RECONNECT`, `DISCONNECT`, `QUIT`).
+`canopen-console <interface> [bitrate]` drives a `Session` the same way, with a small split-screen console
+(`HELP`, `STATUS`, `CONNECT`, `DISCONNECT`, `QUIT`). `CONNECT` makes one attempt and nothing is retried.
 
 ## Use
 

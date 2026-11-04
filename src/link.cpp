@@ -48,6 +48,8 @@ const char* codeName(LinkErrc code) noexcept {
     case LinkErrc::OpenFailed:  return "cannot open the CAN interface";
     case LinkErrc::Lost:        return "CAN interface lost";
     case LinkErrc::CloseFailed: return "error while closing the CAN interface";
+    case LinkErrc::Timeout:     return "opening the CAN interface took too long";
+    case LinkErrc::WrongState:  return "not valid in the current state of the CAN interface";
     }
     return "unknown error";
 }

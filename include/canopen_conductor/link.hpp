@@ -38,6 +38,8 @@ enum class LinkErrc : std::uint8_t {
     OpenFailed,   // the interface does not exist, is busy, or refused the settings
     Lost,         // the port failed while open
     CloseFailed,  // the OS reported an error while closing. The link is closed anyway.
+    Timeout,      // opening took longer than the host allowed (reported by Session::connect(), after the fact)
+    WrongState,   // the call is not valid in the current state, e.g. connect() while the link is open
 };
 
 struct LinkError {
