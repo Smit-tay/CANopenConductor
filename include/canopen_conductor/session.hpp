@@ -20,12 +20,19 @@
 //     }
 //     session.close();
 //
+// A Session can also carry a Master (startMaster()). While one runs, step() does what the Master needs on the
+// I/O thread: it hands every received frame to Master::onFrame(), calls Master::tick() after each turn, and
+// shortens its wait so that the turn ends when the Master next has work (heartbeat due, timeout due). The Master's
+// callbacks therefore run inside step(), on the I/O thread, and must only signal. The Master is stopped by
+// close(), by connect() and by a loss: it never outlives the open link it was started on.
+//
 // One exception to "no clock": connect() reads std::chrono::steady_clock to apply its timeout. The operating system
 // calls that open a port cannot be interrupted, so the timeout is applied after the fact: an open that took longer
 // than allowed is closed again and reported as a failure (LinkErrc::Timeout). It bounds what the host accepts, not
 // how long the OS call blocks.
 
 #include "canopen_conductor/link.hpp"
+#include "canopen_conductor/master.hpp"
 
 #include <array>
 #include <atomic>
@@ -48,6 +55,7 @@ public:
     static constexpr Duration kDefaultConnectTimeout = std::chrono::seconds(2);
 
     Session() noexcept = default;
+    ~Session() { stopMaster(); }
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
@@ -76,14 +84,29 @@ public:
     // None after a call that succeeded.
     LinkError error() const noexcept { return error_; }
 
+    // Builds a Master over the open link and runs it from step() on. I/O thread. `config` is copied by the
+    // Master (its node and PDO tables), the callbacks and context in it stay yours. False if the link is not open,
+    // a Master runs already, the config is invalid, or there is no memory. Memory is taken here, never in step().
+    bool startMaster(const MasterConfig& config) noexcept;
+
+    // Stops the Master, if one runs. I/O thread.
+    void stopMaster() noexcept;
+
+    // The running Master, or nullptr. I/O thread only. Valid until stopMaster(), close(), connect() or a loss.
+    Master* master() noexcept { return master_; }
+
     // Closed, Open (working) or Lost (was open, the port failed). I/O thread.
     LinkState linkState() const noexcept { return link_.state(); }
 
-    // How many frames have been received (and, for now, dropped) since the Session was made. Any thread.
+    // How many frames have been received since the Session was made. Any thread.
     std::uint64_t rxFrames() const noexcept { return rxFrames_.load(std::memory_order_relaxed); }
 
 private:
+    static TimePoint now() noexcept;
+
     Link link_;
+    Master* master_ = nullptr;
+    void* masterMemory_ = nullptr;
     LinkConfig config_;
     std::array<char, kMaxInterfaceName + 1> name_ {};
 
