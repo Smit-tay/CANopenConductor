@@ -56,6 +56,9 @@ struct PdoConfig {
     std::uint8_t entryCount = 0;        // 0..64; 0 for an MPDO
     Duration timeout{};                 // deadline monitoring; 0 = off
     bool mpdo = false;                  // multiplexed PDO, reported through MpdoFn
+    // Raw PDO: the host decodes the payload itself. No entries; every frame is handed over whole through
+    // RawPdoFn, and the deadline monitoring (timeout) still works, reported through PdoFn like for a decoded PDO.
+    bool raw = false;
 };
 
 // One decoded value.
@@ -80,6 +83,18 @@ struct PdoEvent {
 
 // Called on the I/O thread. Must only signal.
 using PdoFn = void (*)(void* context, const PdoEvent& event) noexcept;
+
+// One received PDO of a raw PdoConfig: the frame, undecoded.
+struct RawPdoEvent {
+    std::uint8_t nodeId = 0;      // producer, from the PdoConfig
+    std::uint16_t cobId = 0;
+    std::uint8_t len = 0;         // 0..8
+    std::uint8_t data[8] = {};
+    std::uint32_t syncCount = 0;  // SYNCs sent or seen by the master so far
+};
+
+// Called on the I/O thread. Must only signal.
+using RawPdoFn = void (*)(void* context, const RawPdoEvent& event) noexcept;
 
 // One received multiplexed PDO (CiA 301 7.2.3.4).
 struct MpdoEvent {

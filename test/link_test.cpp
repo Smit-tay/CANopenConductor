@@ -70,6 +70,25 @@ long elapsedMs(std::chrono::steady_clock::time_point since) {
 int main() {
     CanFrame frame;
 
+    // --- bytes that arrive before the open must not spoil the first line ---
+    {
+        // A heartbeat written while the port is still cooked: its CR would turn into LF, and the half line would
+        // glue to the next one. open() drops what was there before the raw mode.
+        Pty pty;
+        CHECK(makePty(pty));
+        CHECK(::write(pty.master, "t72117F\r", 8) == 8);
+        Link link;
+        CHECK(link.open({ pty.name, 250000 }));
+        CHECK(::write(pty.master, "t7E484400000000000000\r", 22) == 22);
+        bool got = false;
+        for (int i = 0; i < 20 && !got; ++i) {
+            got = link.poll(frame, 50ms) == LinkEvent::Frame;
+        }
+        CHECK(got && frame.id == 0x7E4);
+        link.close();
+        ::close(pty.master);
+    }
+
     // --- configuration and open errors ---
     {
         Link link;

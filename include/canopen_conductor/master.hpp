@@ -27,6 +27,7 @@ struct MasterConfig {
     std::size_t maxNodes = 0;           // capacity for addNode; 0 = nodeCount
     NmtMasterConfig nmt{};
     SyncConfig sync{};                  // own SYNC producer; its cobId is also the SYNC consumed when off
+    bool syncStarted = true;            // false: the producer waits for startSync()
     MasterSdoConfig sdo{};
     const PdoConfig* pdos = nullptr;    // slave TPDOs to decode; copied by create()
     std::size_t pdoCount = 0;
@@ -41,6 +42,7 @@ struct MasterConfig {
     EmcyFn onEmcy = nullptr;
     PdoFn onPdo = nullptr;
     MpdoFn onMpdo = nullptr;
+    RawPdoFn onRawPdo = nullptr;
     LssDoneFn onLss = nullptr;
     void* context = nullptr;
 };
@@ -94,6 +96,12 @@ public:
     // the send queue is full.
     bool sendTime(std::uint32_t msAfterMidnight, std::uint16_t days) noexcept;
 
+    // Starts or stops the own SYNC producer (see MasterConfig::syncStarted). The producer's time grid starts with
+    // its first tick after the first start. No effect when the config has no SYNC period.
+    void startSync() noexcept { syncRunning_ = true; }
+    void stopSync() noexcept { syncRunning_ = false; }
+    bool syncRunning() const noexcept { return syncRunning_ && sync_.enabled(); }
+
     // SYNCs sent by the own producer, or seen on the bus while it is off.
     std::uint32_t syncCount() const noexcept { return syncCount_; }
 
@@ -117,6 +125,7 @@ private:
         std::uint8_t nodeId;
         std::uint16_t cobId;
         bool mpdo;
+        bool raw;
         bool monitoring;  // deadline check running (after the first frame)
         bool timedOut;
         Duration timeout;
@@ -148,10 +157,12 @@ private:
     EmcyFn onEmcy_;
     PdoFn onPdo_;
     MpdoFn onMpdo_;
+    RawPdoFn onRawPdo_;
     void* context_;
     std::uint32_t syncCobId_;
     std::uint32_t timeCobId_;
     std::uint32_t syncCount_ = 0;
+    bool syncRunning_ = true;
     SdoClient* sdo_ = nullptr;      // one per node slot, same order as nodes_
     std::uint32_t* sdoIds_ = nullptr;   // per node slot: request, response, emcy CAN-IDs (3 each)
     PdoSlot* pdos_ = nullptr;

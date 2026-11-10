@@ -66,7 +66,14 @@ bool validPdoShape(const PdoConfig& p) noexcept {
         return false;
     }
     // MPDOs carry a different object each time: no deadline monitoring.
-    return p.mpdo ? p.entryCount == 0 && p.timeout == Duration::zero() : validPdoEntries(p.entries, p.entryCount);
+    if (p.mpdo) {
+        return !p.raw && p.entryCount == 0 && p.timeout == Duration::zero();
+    }
+    // A raw PDO has no entries: the host decodes it.
+    if (p.raw) {
+        return p.entryCount == 0;
+    }
+    return validPdoEntries(p.entries, p.entryCount);
 }
 
 // Dry run of create(): every node and PDO valid, every routed CAN-ID unique.
@@ -174,8 +181,8 @@ Master* Master::create(void* memory, std::size_t size, const MasterConfig& confi
 Master::Master(ICanBus& bus, const MasterConfig& config) noexcept
     : bus_(&bus), nmt_(bus, config.nmt), sync_(bus, config.sync), lss_(bus, lssConfig(config)),
       sdoConfig_(config.sdo), onSdoDone_(config.onSdoDone), onEmcy_(config.onEmcy), onPdo_(config.onPdo),
-      onMpdo_(config.onMpdo), context_(config.context), syncCobId_(config.sync.cobId),
-      timeCobId_(config.timeCobId) {}
+      onMpdo_(config.onMpdo), onRawPdo_(config.onRawPdo), context_(config.context), syncCobId_(config.sync.cobId),
+      timeCobId_(config.timeCobId), syncRunning_(config.syncStarted) {}
 
 // ---------------------------------------------------------------------------
 // Nodes and PDOs
@@ -263,6 +270,7 @@ bool Master::addPdo(const PdoConfig& p) noexcept {
     slot->nodeId = p.nodeId;
     slot->cobId = p.cobId;
     slot->mpdo = p.mpdo;
+    slot->raw = p.raw;
     slot->timeout = p.timeout;
     setRoute(p.cobId, RoutePdo, pdoCount_);
     ++pdoCount_;
@@ -355,6 +363,20 @@ void Master::onPdoFrame(PdoSlot& slot, const CanFrame& frame, TimePoint now) noe
         onMpdo_(context_, e);
         return;
     }
+    if (slot.raw) {
+        if (onRawPdo_ != nullptr) {
+            RawPdoEvent e;
+            e.nodeId = slot.nodeId;
+            e.cobId = slot.cobId;
+            e.len = frame.len;
+            for (std::uint8_t i = 0; i < frame.len; ++i) {
+                e.data[i] = frame.data[i];
+            }
+            e.syncCount = syncCount_;
+            onRawPdo_(context_, e);
+        }
+        return;
+    }
     if (onPdo_ != nullptr) {
         reportPdo(slot, decodePdo(slot.entries, slot.entryCount, frame, pdoValues_), false);
     }
@@ -373,7 +395,7 @@ void Master::reportPdo(const PdoSlot& slot, int count, bool timeout) noexcept {
 }
 
 void Master::tick(TimePoint now) noexcept {
-    if (sync_.tick(now)) {
+    if (syncRunning_ && sync_.tick(now)) {
         ++syncCount_;
     }
     nmt_.tick(now);
@@ -394,7 +416,7 @@ void Master::tick(TimePoint now) noexcept {
 }
 
 TimePoint Master::nextDeadline(TimePoint now) const noexcept {
-    TimePoint d = sync_.nextDeadline(now);
+    TimePoint d = syncRunning_ ? sync_.nextDeadline(now) : TimePoint::max();
     const auto earlier = [&d](TimePoint t) { d = t < d ? t : d; };
     earlier(nmt_.nextDeadline(now));
     earlier(lss_.nextDeadline(now));

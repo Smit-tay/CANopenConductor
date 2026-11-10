@@ -60,6 +60,8 @@ bool SerialPort::open(const char* device, unsigned baud) noexcept {
         ::cfsetispeed(&t, speedOf(baud));
         ::cfsetospeed(&t, speedOf(baud));
         ::tcsetattr(fd_, TCSANOW, &t);
+        // Bytes that arrived before the raw mode (CR turned to LF, so half a line) must not glue to the first real line.
+        ::tcflush(fd_, TCIFLUSH);
     }
     return true;
 }
