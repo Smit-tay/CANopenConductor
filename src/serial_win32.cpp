@@ -161,7 +161,7 @@ long SerialPort::read(char* buf, std::size_t capacity, Duration timeout) noexcep
             if (which == WAIT_OBJECT_0 + 1) {
                 waker_->drain();
             }
-            ::CancelIo(h);
+            ::CancelIoEx(h, ov(readOv_));  // only the read: CancelIo() would cancel a pending write too
         }
         if (!::GetOverlappedResult(h, ov(readOv_), &got, TRUE)) {
             if (::GetLastError() == ERROR_OPERATION_ABORTED) {
