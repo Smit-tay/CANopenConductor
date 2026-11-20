@@ -3,7 +3,18 @@
 #include "canopen_conductor/frame.hpp"
 #include "canopen_conductor/time.hpp"
 
+#include <cstdint>
+
 namespace canopen_conductor {
+
+// Whether a CAN interface is in listen-only mode: it receives, but never sends and never acknowledges a frame.
+// That is a property of the controller or adapter, set outside this library (on Linux with `ip link ... listen-only
+// on`); the library only asks.
+enum class ListenOnly : std::uint8_t {
+    Yes,
+    No,
+    Unknown,  // the OS has no such setting for this interface, or it did not answer
+};
 
 enum class RxStatus {
     Frame,    // a frame was received

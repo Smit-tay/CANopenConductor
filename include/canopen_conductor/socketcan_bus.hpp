@@ -5,6 +5,7 @@
 #include "canopen_conductor/can_bus.hpp"
 #include "canopen_conductor/waker.hpp"
 
+#include <cstddef>
 #include <cstdint>
 
 namespace canopen_conductor::linux_port {
@@ -40,6 +41,18 @@ public:
     // Current status; clears the overflow latches and the changed flag.
     BusStatus takeBusStatus() noexcept;
 
+    // Whether the interface was in listen-only mode when open() succeeded (the OS's CAN control mode).
+    // Unknown before the first open().
+    ListenOnly listenOnly() const noexcept { return listenOnly_; }
+
+    // Asks the OS, over rtnetlink, whether an interface is in listen-only mode. Unknown if the interface has no CAN
+    // control mode (not a CAN device, no such interface) or the OS did not answer within 200 ms. Opens and closes a
+    // socket of its own; call it from the I/O thread, not from a real-time path.
+    static ListenOnly queryListenOnly(const char* ifname) noexcept;
+
+    // The reading of the OS's answer to an RTM_GETLINK request, on its own so that a test can feed it a message.
+    static ListenOnly parseListenOnly(const void* message, std::size_t size) noexcept;
+
 private:
     void onErrorFrame(std::uint32_t canId, const std::uint8_t* data) noexcept;
     void setState(BusState s) noexcept;
@@ -51,6 +64,7 @@ private:
     bool changed_ = false;
     BusStatus status_{};
     std::uint32_t dropped_ = 0;  // socket receive-queue drop counter
+    ListenOnly listenOnly_ = ListenOnly::Unknown;
 };
 
 } // namespace canopen_conductor::linux_port

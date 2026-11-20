@@ -8,10 +8,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <linux/can/netlink.h>
+#include <linux/if_link.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <poll.h>
 #include <pty.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 using namespace canopen_conductor;
 using namespace std::chrono_literals;
@@ -58,6 +63,44 @@ std::size_t readMaster(int fd, char* buf, std::size_t cap, std::size_t want, int
         }
     }
     return got;
+}
+
+// A netlink attribute: length and type, the payload, then padding to 4 bytes.
+void appendAttribute(std::vector<unsigned char>& out, unsigned short type, const void* payload, std::size_t size) {
+    const rtattr header { static_cast<unsigned short>(sizeof(rtattr) + size), type };
+    const auto* h = reinterpret_cast<const unsigned char*>(&header);
+    out.insert(out.end(), h, h + sizeof header);
+    const auto* p = static_cast<const unsigned char*>(payload);
+    out.insert(out.end(), p, p + size);
+    while (out.size() % 4 != 0) {
+        out.push_back(0);
+    }
+}
+
+// What the kernel answers to RTM_GETLINK for a CAN interface: IFLA_LINKINFO > IFLA_INFO_DATA > IFLA_CAN_CTRLMODE.
+// `withData` false leaves the CAN data out, as for an interface that is not a CAN device (vcan, say).
+std::vector<unsigned char> linkMessage(bool withData, std::uint32_t flags) {
+    const can_ctrlmode mode { CAN_CTRLMODE_LISTENONLY, flags };
+    std::vector<unsigned char> control;
+    appendAttribute(control, IFLA_CAN_CTRLMODE, &mode, sizeof mode);
+
+    std::vector<unsigned char> info;
+    appendAttribute(info, IFLA_INFO_KIND, "can", 4);
+    if (withData) {
+        appendAttribute(info, static_cast<unsigned short>(IFLA_INFO_DATA | NLA_F_NESTED), control.data(), control.size());
+    }
+
+    std::vector<unsigned char> attributes;
+    appendAttribute(attributes, IFLA_IFNAME, "can0", 5);
+    appendAttribute(attributes, static_cast<unsigned short>(IFLA_LINKINFO | NLA_F_NESTED), info.data(), info.size());
+
+    std::vector<unsigned char> message(sizeof(nlmsghdr) + sizeof(ifinfomsg));
+    nlmsghdr header {};
+    header.nlmsg_len = static_cast<std::uint32_t>(message.size() + attributes.size());
+    header.nlmsg_type = RTM_NEWLINK;
+    std::memcpy(message.data(), &header, sizeof header);
+    message.insert(message.end(), attributes.begin(), attributes.end());
+    return message;
 }
 
 long elapsedMs(std::chrono::steady_clock::time_point since) {
@@ -117,6 +160,43 @@ int main() {
         CHECK(link.close());                              // closing a closed link is fine
     }
 
+    // --- listen-only: the OS's answer, read from a kernel message ---
+    {
+        using linux_port::SocketCanBus;
+        const auto yes = linkMessage(true, CAN_CTRLMODE_LISTENONLY | CAN_CTRLMODE_3_SAMPLES);
+        const auto no = linkMessage(true, CAN_CTRLMODE_3_SAMPLES);
+        CHECK(SocketCanBus::parseListenOnly(yes.data(), yes.size()) == ListenOnly::Yes);
+        CHECK(SocketCanBus::parseListenOnly(no.data(), no.size()) == ListenOnly::No);
+
+        // no CAN control mode in the answer (an interface that is not a CAN device)
+        const auto noData = linkMessage(false, 0);
+        CHECK(SocketCanBus::parseListenOnly(noData.data(), noData.size()) == ListenOnly::Unknown);
+
+        // an error answer, a truncated answer, nothing at all
+        auto error = yes;
+        nlmsghdr header;
+        std::memcpy(&header, error.data(), sizeof header);
+        header.nlmsg_type = NLMSG_ERROR;
+        std::memcpy(error.data(), &header, sizeof header);
+        CHECK(SocketCanBus::parseListenOnly(error.data(), error.size()) == ListenOnly::Unknown);
+        CHECK(SocketCanBus::parseListenOnly(yes.data(), yes.size() - 1) == ListenOnly::Unknown);
+        CHECK(SocketCanBus::parseListenOnly(yes.data(), 10) == ListenOnly::Unknown);
+        CHECK(SocketCanBus::parseListenOnly(nullptr, 0) == ListenOnly::Unknown);
+
+        // every cut of a good answer must be refused without reading past its end
+        for (std::size_t n = 0; n < yes.size(); ++n) {
+            CHECK(SocketCanBus::parseListenOnly(yes.data(), n) == ListenOnly::Unknown);
+        }
+
+        // the real kernel: an interface that exists but has no CAN control mode, and one that does not exist
+        CHECK(SocketCanBus::queryListenOnly("lo") == ListenOnly::Unknown);
+        CHECK(SocketCanBus::queryListenOnly("nosuchcan0") == ListenOnly::Unknown);
+
+        // a link that is not open knows nothing
+        Link closed;
+        CHECK(closed.listenOnly() == ListenOnly::Unknown);
+    }
+
     // --- a working link ---
     Pty pty;
     if (!makePty(pty)) {
@@ -128,6 +208,7 @@ int main() {
         CHECK(link.open({ pty.name, 500000 }));
         CHECK(link.state() == LinkState::Open);
         CHECK(link.lastError().code == LinkErrc::None);
+        CHECK(link.listenOnly() == ListenOnly::No);  // a serial adapter is opened in normal mode
 
         char buf[256] = {};
         const char expected[] = "C\rS6\rO\r";
@@ -235,6 +316,7 @@ int main() {
         // close: ok, ends Closed, tells the adapter
         CHECK(link.close());
         CHECK(link.state() == LinkState::Closed);
+        CHECK(link.listenOnly() == ListenOnly::Unknown);
         std::memset(buf, 0, sizeof buf);
         CHECK(readMaster(again.master, buf, sizeof buf, 2, 1000) == 2 && std::memcmp(buf, "C\r", 2) == 0);
         ::close(again.master);

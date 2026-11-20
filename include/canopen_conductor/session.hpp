@@ -98,6 +98,10 @@ public:
     // Closed, Open (working) or Lost (was open, the port failed). I/O thread.
     LinkState linkState() const noexcept { return link_.state(); }
 
+    // Whether the open interface is in listen-only mode, as the OS reports it (see Link::listenOnly()). I/O thread.
+    // Unknown while the interface is not open.
+    ListenOnly listenOnly() const noexcept { return link_.listenOnly(); }
+
     // How many frames have been received since the Session was made. Any thread.
     std::uint64_t rxFrames() const noexcept { return rxFrames_.load(std::memory_order_relaxed); }
 

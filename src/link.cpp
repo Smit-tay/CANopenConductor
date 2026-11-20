@@ -115,8 +115,10 @@ bool Link::open(const LinkConfig& config) noexcept {
 
 #if defined(__linux__)
     active_ = serial_ ? static_cast<ICanBus*>(&slcan_) : static_cast<ICanBus*>(&socketCan_);
+    listenOnly_ = serial_ ? ListenOnly::No : socketCan_.listenOnly();
 #else
     active_ = &slcan_;
+    listenOnly_ = ListenOnly::No;
 #endif
     state_ = LinkState::Open;
     return true;

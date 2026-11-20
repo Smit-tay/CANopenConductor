@@ -118,6 +118,12 @@ public:
     bool busStatusChanged() const noexcept;
     BusStatus takeBusStatus() noexcept;
 
+    // Whether the interface is in listen-only mode, as the OS reports it: then nothing this host does can put a frame
+    // or an acknowledgement on the bus. Read when open() succeeded; Unknown while the state is not Open.
+    //  - A serial adapter (slcan on COMn or a tty): always No. The library opens it in normal mode.
+    //  - A SocketCAN interface (Linux): what the OS says, or Unknown if it has no such setting.
+    ListenOnly listenOnly() const noexcept { return state_ == LinkState::Open ? listenOnly_ : ListenOnly::Unknown; }
+
     // The port as an ICanBus, for a Master. Valid only while the state is Open.
     ICanBus* bus() noexcept { return active_; }
 
@@ -138,6 +144,7 @@ private:
     ICanBus* active_ = nullptr;
     LinkState state_ = LinkState::Closed;
     LinkError error_;
+    ListenOnly listenOnly_ = ListenOnly::Unknown;
     bool serial_ = false;  // which of the two ports is active
 };
 
